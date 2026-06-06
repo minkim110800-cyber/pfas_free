@@ -16,6 +16,7 @@ opt_temp   = [60.0, 62.0, 63.0, 70.0, 40.0];
 opt_rpm    = [4400, 4400, 4600, 3500, 3200];  
 gamma_base = [17.0, 28.0, 27.0, 56.0, 72.0];  
 theta_deg  = [115.0, 75.0, 78.0, 65.0, 70.0]; 
+viscosity_base = [1.02, 1.15, 1.20, 1.50, 1.00];  % ◀ 이 줄을 똑같이 타이핑해서 넣어라!
 
 f1 = figure('Name', 'Wafer Radial Stress Distribution', 'Position', [100, 100, 850, 550], 'Color', 'w');
 hold on; grid on;
@@ -28,9 +29,10 @@ for i = 1:length(chem_names)
     RPM = opt_rpm(i);
     g_base = gamma_base(i);
     th = theta_deg(i);
+    v_base = viscosity_base(i);  % ◀ [1단계 복구]: 위에서 만든 배열을 순서대로 호출!
     
     gamma_eff = g_base - 0.1 * (T - 25.0);
-    phi_viscosity = 1.02 * exp(100 / (T + 273.15));
+    phi_viscosity = v_base * exp(100 / (T + 273.15)); % ◀ [2단계 복구]: 1.02 지우고 v_base로 연산!
     
     % 모세관 압력 (단위 변환 유지)
     p_cap_pa = abs((2 * (gamma_eff * 1e-3) * cos(deg2rad(th))) / d_pattern);
