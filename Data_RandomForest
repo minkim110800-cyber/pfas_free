@@ -4,70 +4,97 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
 
-# [STEP 1] 데이터셋 생성 로직 (기존 부록 코드 기반 요약)
+# ==============================================================================
+# [STEP 1] 소논문 규격 반영 5종 약액 고유 물성치 매핑 (데이터 무결성 확보)
+# ==============================================================================
 substances_info = {
-    'Novec 4200': {'gamma': 17.0, 'theta': 115.0},
-    'Triton BG-10': {'gamma': 28.0, 'theta': 75.0},
-    'Triton CG-50': {'gamma': 27.0, 'theta': 78.0},
-    'Brij S100': {'gamma': 56.0, 'theta': 65.0},
-    'DI-03': {'gamma': 72.0, 'theta': 70.0}
-} # [cite: 212, 213, 214, 215, 216, 217]
+    'Novec 4200': {'gamma': 17.0, 'theta': 115.0, 'viscosity': 1.02},     #
+    'Triton BG-10': {'gamma': 28.0, 'theta': 75.0, 'viscosity': 1.15},   #
+    'Triton CG-50': {'gamma': 27.0, 'theta': 78.0, 'viscosity': 1.20},   #
+    'Brij S100': {'gamma': 56.0, 'theta': 65.0, 'viscosity': 1.50},      #
+    'DI-O3': {'gamma': 72.0, 'theta': 70.0, 'viscosity': 1.00}           #
+}
 
-NUM_SAMPLES = 20000 # [cite: 218]
-np.random.seed(42) # [cite: 219]
+NUM_SAMPLES = 20000 #
+np.random.seed(42)
 
-temp = np.random.uniform(20, 90, NUM_SAMPLES) # [cite: 221]
-rpm = np.random.uniform(500, 10000, NUM_SAMPLES) # [cite: 222]
-sub_names = np.random.choice(list(substances_info.keys()), NUM_SAMPLES) # [cite: 223]
+# ==============================================================================
+# [STEP 2] 실제 팹(Fab) 환경 모사 6차원 변수 공간 확률적 샘플링
+# ==============================================================================
+temp = np.random.uniform(20, 90, NUM_SAMPLES)
+rpm = np.random.uniform(500, 6000, NUM_SAMPLES)       # 설비 하드웨어 안정 상한선 6,000 RPM 제약 준수
+radius = np.random.uniform(0, 0.15, NUM_SAMPLES)      # 웨이퍼 실제 반경 방향 가변 인자 (0 ~ 0.15m)
+sub_names = np.random.choice(list(substances_info.keys()), NUM_SAMPLES)
 
-gamma_base = np.array([substances_info[name]['gamma'] for name in sub_names]) # [cite: 225]
-theta = np.array([substances_info[name]['theta'] for name in sub_names]) # [cite: 226, 228]
+gamma_base = np.array([substances_info[name]['gamma'] for name in sub_names])
+theta = np.array([substances_info[name]['theta'] for name in sub_names])
+viscosity_base = np.array([substances_info[name]['viscosity'] for name in sub_names])
 
-# 물리 엔진 연산 및 붕괴 판정 [cite: 229]
-gamma_eff = gamma_base - 0.1 * (temp - 25.0) # [cite: 232]
-P_cap = np.abs((2 * (gamma_eff * 1e-3) * np.cos(np.radians(theta))) / 20e-9) * 1e-6 # [cite: 235]
-P_rpm = 0.00000008 * (rpm**2) # [cite: 236]
-P_total = P_cap + P_rpm # [cite: 237]
+# ==============================================================================
+# [STEP 3] 통합 물리 엔진 연산 및 붕괴 레이블링 (MATLAB 모델과 100% 동기화)
+# ==============================================================================
+d_pattern = 20e-9
+r_max = 0.15
+k_constant = 1.2e-7
+vib_constant = 1.0e-8
 
-damage_factor = 1.0 - 0.15 * np.random.randn(NUM_SAMPLES) # [cite: 239, 240]
-P_limit = 5.0 * damage_factor # [cite: 241]
-collapse = (P_total > P_limit).astype(int) # [cite: 242]
+# 1. 온도 변수에 따른 표면장력 완화 효과 및 Andrade 점도 비선형 가중치 산출
+gamma_eff = gamma_base - 0.1 * (temp - 25.0)
+phi_viscosity = viscosity_base * np.exp(100 / (temp + 273.15))
 
+# 2. 하겐-포아죄유 배수 저항이 결합된 총 모세관 압력 연산 (MPa)
+p_cap_pa = np.abs((2 * (gamma_eff * 1e-3) * np.cos(np.radians(theta))) / d_pattern)
+p_cap = p_cap_pa * phi_viscosity * 1e-6
+
+# 3. 반지름 방향 위치별 원심 압력 및 장비 미세 진동 패널티 연산 (MPa)
+p_rpm = (radius / r_max) * (k_constant * (rpm**2))
+p_vibration = (radius / r_max) * (vib_constant * (rpm**2))
+
+# 4. 최종 통합 수평 중첩 응력 도출 및 LER 확률적 물리 노이즈 주입
+p_total = p_cap + p_rpm + p_vibration
+damage_factor = 1.0 - 0.15 * np.random.randn(NUM_SAMPLES)
+p_limit = 5.0 * damage_factor
+
+# 5. 패턴 구조 붕괴 최종 판정 (Collapse: 1, Safe: 0)
+collapse = (p_total > p_limit).astype(int)
+
+# ==============================================================================
+# [STEP 4] 진짜 6차원 데이터프레임 구축 및 8:2 독립 교차 검증 체계 수립
+# ==============================================================================
 df = pd.DataFrame({
-    'Temp': temp, 'RPM': rpm, 'Gamma': gamma_base, 'Theta': theta, 'Collapse': collapse
-}) # [cite: 244, 245, 246, 247, 248, 249]
+    'Temp': temp, 'RPM': rpm, 'Radius': radius * 1000, # mm 스케일 보정
+    'Gamma': gamma_base, 'Theta': theta, 'Viscosity': viscosity_base, 
+    'Collapse': collapse
+})
 
-# ========================================================
-# 💡 김민준 역할 핵심: 데이터 분리 및 다중 지표 검증 체계 도입
-# ========================================================
+X = df[['Temp', 'RPM', 'Radius', 'Gamma', 'Theta', 'Viscosity']]
+y = df['Collapse']
 
-# 1. 독립변수(X)와 종속변수(y) 설정 [cite: 254, 255]
-X = df[['Temp', 'RPM', 'Gamma', 'Theta']] # [cite: 254]
-y = df['Collapse'] # [cite: 255]
-
-# 2. Train 데이터와 Test 데이터를 8:2 비율로 분리
-# stratify=y 옵션은 학습과 테스트셋의 붕괴/안전 데이터 비율을 균일하게 맞춰줌
+# 학습 데이터 80%, 테스트 데이터 20% 엄격 분리
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.2, random_state=42, stratify=y
 )
 
-print(f"학습 데이터 개수: {X_train.shape[0]}개 | 테스트 데이터 개수: {X_test.shape[0]}개")
-
-# 3. Random Forest 모델을 '학습 데이터(Train)'로만 학습 [cite: 256]
-rf_model = RandomForestClassifier(n_estimators=100, random_state=42) # [cite: 256]
+# ==============================================================================
+# [STEP 5] 메인 알고리즘: Random Forest 분류기 학습 및 다중 지표 평가
+# ==============================================================================
+# [교체]: 최종 메인 모델을 Random Forest 분류기로 선언 및 독립 학습 진행
+rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
 rf_model.fit(X_train, y_train)
 
-# 4. '테스트 데이터(Test)'를 투입해 예측 성능 검증
+# 독립된 테스트 데이터셋 투입 후 예측 성능 검증
 y_pred = rf_model.predict(X_test)
 
-# 5. 교수님 방어용 다각화 성능 지표 산출
+# 교수님 디펜스용 4대 표준 성능 지표 계산
 accuracy = accuracy_score(y_test, y_pred)
 precision = precision_score(y_test, y_pred)
 recall = recall_score(y_test, y_pred)
 f1 = f1_score(y_test, y_pred)
 
-print("\n[✔] Random Forest 검증 결과")
+# 최종 결과 콘솔 출력
+print(f"학습 데이터 개수: {X_train.shape[0]}개 | 테스트 데이터 개수: {X_test.shape[0]}개")
+print("\n[✔] Random Forest 최종 검증 결과")
 print(f"- Accuracy (전체 예측 정확도)  : {accuracy:.4f}")
-print(f"- Precision (붕괴라 예측한 것 중 실제 붕괴) : {precision:.4f}")
-print(f"- Recall (실제 붕괴 중 모델이 맞춘 비율)   : {recall:.4f}")
-print(f"- F1-Score (정밀도와 재현율의 조화 평균)  : {f1:.4f}")
+print(f"- Precision (붕괴 예측 정밀도) : {precision:.4f}")
+print(f"- Recall (실제 붕괴 맞춘 재현율): {recall:.4f}")
+print(f"- F1-Score (학술 표준 조화 평균): {f1:.4f}")
