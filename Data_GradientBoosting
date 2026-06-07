@@ -1,0 +1,105 @@
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_score
+
+# ==============================================================================
+# [STEP 1] 소논문 규격 반영 5종 약액 고유 물성치 매핑
+# ==============================================================================
+substances_info = {
+    'Novec 4200': {'gamma': 17.0, 'theta': 115.0, 'viscosity': 1.02},
+    'Triton BG-10': {'gamma': 28.0, 'theta': 75.0, 'viscosity': 1.15},
+    'Triton CG-50': {'gamma': 27.0, 'theta': 78.0, 'viscosity': 1.20},
+    'Brij S100': {'gamma': 56.0, 'theta': 65.0, 'viscosity': 1.50},
+    'DI-O3': {'gamma': 72.0, 'theta': 70.0, 'viscosity': 1.00}
+} #
+
+NUM_SAMPLES = 20000 # 소논문 명시 대규모 데이터셋 규모
+np.random.seed(42)
+
+# ==============================================================================
+# [STEP 2] 실제 팹(Fab) 환경 모사 6차원 변수 공간 확률적 샘플링
+# ==============================================================================
+temp = np.random.uniform(20, 90, NUM_SAMPLES)
+rpm = np.random.uniform(500, 6000, NUM_SAMPLES)       # 설비 구동 안정 상한선 6,000 RPM 제한
+radius = np.random.uniform(0, 0.15, NUM_SAMPLES)      # 웨이퍼 실제 반경 (0 ~ 150mm 가변 인자 추가)
+sub_names = np.random.choice(list(substances_info.keys()), NUM_SAMPLES)
+
+gamma_base = np.array([substances_info[name]['gamma'] for name in sub_names])
+theta = np.array([substances_info[name]['theta'] for name in sub_names])
+viscosity_base = np.array([substances_info[name]['viscosity'] for name in sub_names])
+
+# ==============================================================================
+# [STEP 3] 통합 물리 엔진 연산 및 붕괴 레이블링 (MATLAB 모델과 100% 동기화)
+# ==============================================================================
+d_pattern = 20e-9
+r_max = 0.15
+k_constant = 1.2e-7
+vib_constant = 1.0e-8
+
+# 1. Andrade 점도 모델 지수 함수 연산 반영
+gamma_eff = gamma_base - 0.1 * (temp - 25.0)
+phi_viscosity = viscosity_base * np.exp(100 / (temp + 273.15))
+
+# 2. 하겐-포아죄유 배수 저항이 중첩된 최종 모세관 압력 도출 (MPa)
+p_cap_pa = np.abs((2 * (gamma_eff * 1e-3) * np.cos(np.radians(theta))) / d_pattern)
+p_cap = p_cap_pa * phi_viscosity * 1e-6
+
+# 3. 반지름(r/r_max) 변수가 주입된 원심 압력 및 장비 미세 진동 패널티 연산
+p_rpm = (radius / r_max) * (k_constant * (rpm**2))
+p_vibration = (radius / r_max) * (vib_constant * (rpm**2))
+
+# 4. 총 합산 응력 및 LER 구조 불확실성 노이즈 주입
+p_total = p_cap + p_rpm + p_vibration
+damage_factor = 1.0 - 0.15 * np.random.randn(NUM_SAMPLES)
+p_limit = 5.0 * damage_factor
+
+# 5. 패턴 구조적 붕괴 여부 최종 확정 (Collapse: 1, Safe: 0)
+collapse = (p_total > p_limit).astype(int)
+
+# ==============================================================================
+# [STEP 4] 진짜 6차원 데이터프레임 구축 및 8:2 독립 교차 검증 체계 수립
+# ==============================================================================
+df = pd.DataFrame({
+    'Temp': temp,
+    'RPM': rpm,
+    'Radius': radius,
+    'Gamma': gamma_base,
+    'Theta': theta,
+    'Viscosity': viscosity_base,
+    'Collapse': collapse
+}) #
+
+# 데이터 차원 6차원으로 정형화 확장
+X = df[['Temp', 'RPM', 'Radius', 'Gamma', 'Theta', 'Viscosity']]
+y = df['Collapse']
+
+# Train-Test Split (학습 80%, 검증 20% 엄격 분리)
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+# ==============================================================================
+# [STEP 5] 메인 알고리즘: Gradient Boosting 분류기 학습 및 다중 지표 평가
+# ==============================================================================
+# [교체]: 소논문 최고 정확도 모델인 Gradient Boosting 분류기 탑재
+gb_model = GradientBoostingClassifier(n_estimators=100, random_state=42)
+gb_model.fit(X_train, y_train)
+
+# 독립된 테스트 데이터셋 수치를 통한 최종 검증
+y_pred = gb_model.predict(X_test)
+
+# 교수님 디펜스용 4대 표준 성능 지표 계산
+accuracy = accuracy_score(y_test, y_pred)
+precision = precision_score(y_test, y_pred)
+recall = recall_score(y_test, y_pred)
+f1 = f1_score(y_test, y_pred)
+
+# 최종 결과 콘솔 출력
+print(f"학습 데이터 개수: {X_train.shape[0]}개 | 테스트 데이터 개수: {X_test.shape[0]}개")
+print("\n[✔] Gradient Boosting 최종 검증 결과")
+print(f"- Accuracy (전체 예측 정확도)  : {accuracy:.4f}")
+print(f"- Precision (붕괴 예측 정밀도) : {precision:.4f}")
+print(f"- Recall (실제 붕괴 맞춘 재현율): {recall:.4f}")
+print(f"- F1-Score (학술 표준 조화 평균): {f1:.4f}")
